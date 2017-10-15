@@ -1,0 +1,15 @@
+{
+  "extends": [
+    "eslint:recommended"
+  ],
+  "parserOptions": {
+    "ecmaVersion": 2017
+  },
+  "rules": {
+    "space-before-function-paren": 0,
+    "no-console": 0
+  },
+  "env": {
+    "node": true
+  }
+}
