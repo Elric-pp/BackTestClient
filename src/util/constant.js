@@ -18,6 +18,22 @@ const DIRECTION_LONG = '多'
 const DIRECTION_SHORT = '空'
 const DIRECTION_UNKNOWN = '未知'
 
+// 本地停止单状态
+const STOPORDER_WAITING = '等待中'
+const STOPORDER_CANCELLED = '已撤销'
+const STOPORDER_TRIGGERED = '已触发'
+
+// CTA引擎中涉及到的交易方向类型
+const CTAORDER_BUY = '买开'
+const CTAORDER_SELL = '卖平'
+const CTAORDER_SHORT = '卖开'
+const CTAORDER_COVER = '买平'
+
+// 开平常量
+const OFFSET_OPEN = '开'
+const OFFSET_CLOSE = '平'
+const OFFSET_UNKNOWN = '未知'
+
 module.exports = {
   TICK_MODE,
   BAR_MODE,
@@ -31,5 +47,15 @@ module.exports = {
   STATUS_UNKNOWN,
   DIRECTION_LONG,
   DIRECTION_SHORT,
-  DIRECTION_UNKNOWN
+  DIRECTION_UNKNOWN,
+  STOPORDER_WAITING,
+  STOPORDER_CANCELLED,
+  STOPORDER_TRIGGERED,
+  CTAORDER_BUY,
+  CTAORDER_SELL,
+  CTAORDER_SHORT,
+  CTAORDER_COVER,
+  OFFSET_OPEN,
+  OFFSET_CLOSE,
+  OFFSET_UNKNOWN
 }

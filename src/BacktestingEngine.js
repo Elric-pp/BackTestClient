@@ -11,7 +11,17 @@ const {
   STATUS_UNKNOWN,
   DIRECTION_LONG,
   DIRECTION_SHORT,
-  DIRECTION_UNKNOWN
+  DIRECTION_UNKNOWN,
+  STOPORDER_WAITING,
+  STOPORDER_CANCELLED,
+  STOPORDER_TRIGGERED,
+  CTAORDER_BUY,
+  CTAORDER_SELL,
+  CTAORDER_SHORT,
+  CTAORDER_COVER,
+  OFFSET_OPEN,
+  OFFSET_CLOSE,
+  OFFSET_UNKNOWN
 } = require('./util/constant')
 const moment = require('moment')
 const csv = require('fast-csv')
@@ -323,7 +333,8 @@ module.exports = class BacktestingEngine {
     }
     
     // 遍历限价单字典中的所有限价单
-    for (let {orderID, order} in this.workingLimitOrderDict) {
+    for (let orderID in this.workingLimitOrderDict) {
+        let order = this.workingLimitOrderDict[orderID]
         // 推送委托进入队列（未成交）的状态更新
         if (!order.status) {
           order.status = STATUS_NOTTRADED
@@ -386,24 +397,224 @@ module.exports = class BacktestingEngine {
       }
   }
 
+  /**
+   * 基于最新数据撮合止损单
+   * 
+   */
   crossStopOrder() {
+    // 先确定会撮合成交的价格，这里和限价单规则相反
+    let buyCrossPrice, sellCrossPrice, bestCrossPrice
+    if (this.mode == this.BAR_MODE) {
+      // 若买入方向止损单价格低于该价格，则会成交
+      buyCrossPrice = this.bar.high    
+      // 若卖出方向止损单价格高于该价格，则会成交
+      sellCrossPrice = this.bar.low    
+      // 最优成交价，买入止损单不能低于，卖出止损单不能高于
+      bestCrossPrice = this.bar.open   
+    } else {
+      buyCrossPrice = this.tick.lastPrice
+      sellCrossPrice = this.tick.lastPrice
+      bestCrossPrice = this.tick.lastPrice
+    }
 
+    // 遍历止损单字典中的所有止损单
+    for (let stopOrderID in this.workingStopOrderDict) {
+      let so = this.workingStopOrderDict[stopOrderID]
+      const buyCross = so.direction === DIRECTION_LONG && so.price <= buyCrossPrice
+      const sellCross = so.direction==DIRECTION_SHORT && so.price >= sellCrossPrice
+      // 如果发生了成交
+      if (buyCross || sellCross) {
+        // 更新止损单状态
+        so.status = STOPORDER_TRIGGERED
+        if (stopOrderID in this.workingStopOrderDict) {
+          delete this.workingStopOrderDict[stopOrderID]                           
+        }
+        // 推送成交数据
+        //成交编号自增1
+        this.tradeCount += 1            
+        const tradeID = this.tradeCount
+        // trade = VtTradeData()
+        const trade = {}
+        trade.vtSymbol = so.vtSymbol
+        trade.tradeID = tradeID
+        trade.vtTradeID = tradeID 
+        if (buyCross) {
+          this.strategy.pos += so.volume
+          trade.price = Math.max(bestCrossPrice, so.price)
+        } else {
+          this.strategy.pos -= so.volume
+          trade.price = Math.min(bestCrossPrice, so.price)                
+        }
+        this.limitOrderCount += 1
+        const orderID = this.limitOrderCount + ''
+        trade.orderID = orderID
+        trade.vtOrderID = orderID
+        trade.direction = so.direction
+        trade.offset = so.offset
+        trade.volume = so.volume
+        trade.tradeTime = moment(this.time).format('HH:mm:ss')
+        trade.time = this.time
+        
+        this.tradeDict[tradeID] = trade
+
+        // 推送委托数据
+        // let order = VtOrderData()
+        let order = {}
+        order.vtSymbol = so.vtSymbol
+        order.symbol = so.vtSymbol
+        order.orderID = orderID
+        order.vtOrderID = orderID
+        order.direction = so.direction
+        order.offset = so.offset
+        order.price = so.price
+        order.totalVolume = so.volume
+        order.tradedVolume = so.volume
+        order.status = STATUS_ALLTRADED
+        order.orderTime = trade.tradeTime
+        
+        this.limitOrderDict[orderID] = order
+        
+        // 按照顺序推送数据
+        this.strategy.onStopOrder(so)
+        this.strategy.onOrder(order)
+        this.strategy.onTrade(trade)
+
+
+      }
+    }
   }
 
-  sendOrder() {
-
+  /**
+   * 发单
+   * 
+   * @param {any} vtSymbol 
+   * @param {any} orderType 
+   * @param {any} price 
+   * @param {any} volume 
+   * @returns 
+   */
+  sendOrder(vtSymbol, orderType, price, volume) {
+    this.limitOrderCount += 1
+    const orderID = this.limitOrderCount
+    
+    const order = {}
+    order.vtSymbol = vtSymbol
+    order.price = this.roundToPriceTick(price)
+    order.totalVolume = volume
+    order.orderID = orderID
+    order.vtOrderID = orderID
+    order.orderTime = moment(this.time).format('HH:mm:ss')
+    
+    // CTA委托类型映射
+    switch (orderType) {
+      case CTAORDER_BUY:
+        order.direction = DIRECTION_LONG
+        order.offset = OFFSET_OPEN
+        break;
+      case CTAORDER_SELL:
+        order.direction = DIRECTION_SHORT
+        order.offset = OFFSET_CLOSE
+        break;
+      case CTAORDER_SHORT:
+        order.direction = DIRECTION_SHORT
+        order.offset = OFFSET_OPEN
+        break;
+      case CTAORDER_COVER:
+        order.direction = DIRECTION_LONG
+        order.offset = OFFSET_CLOSE     
+        break;
+      default:
+        break;
+    }
+    
+    // 保存到限价单字典中
+    this.workingLimitOrderDict[orderID] = order
+    this.limitOrderDict[orderID] = order
+    
+    return orderID
   }
 
-  cancelOrder() {
+  /**
+   * 撤单
+   * 
+   * @param {any} orderID 
+   */
+  cancelOrder(orderID) {
+    if (orderID in this.workingLimitOrderDict) {
+      const order = this.workingLimitOrderDict[orderID]
+      order.status = STATUS_CANCELLED
+      order.cancelTime = moment(this.time).format('HH:mm:ss')
+      delete this.workingLimitOrderDict[orderID]
+    }
+  }
+  
+  /**
+   * 发停止单（本地实现）
+   * 
+   * @param {any} vtSymbol 
+   * @param {any} orderType 
+   * @param {any} price 
+   * @param {any} volume 
+   * @param {any} strategy 
+   */
+  sendStopOrder(vtSymbol, orderType, price, volume, strategy) {
+    this.stopOrderCount += 1
+    const stopOrderID = STOP_ORDER_PREFIX + this.stopOrderCount
+    
+    // so = StopOrder()
+    const so = {}
+    so.vtSymbol = vtSymbol
+    so.price = this.roundToPriceTick(price)
+    so.volume = volume
+    so.strategy = strategy
+    so.status = STOPORDER_WAITING
+    so.stopOrderID = stopOrderID
 
+    // CTA委托类型映射
+    switch (orderType) {
+      case CTAORDER_BUY:
+        so.direction = DIRECTION_LONG
+        so.offset = OFFSET_OPEN
+        break;
+      case CTAORDER_SELL:
+        so.direction = DIRECTION_SHORT
+        so.offset = OFFSET_CLOSE
+        break;
+      case CTAORDER_SHORT:
+        so.direction = DIRECTION_SHORT
+        so.offset = OFFSET_OPEN
+        break;
+      case CTAORDER_COVER:
+        so.direction = DIRECTION_LONG
+        so.offset = OFFSET_CLOSE      
+        break;
+      default:
+        break;
+    }
+
+    // 保存stopOrder对象到字典中
+    this.stopOrderDict[stopOrderID] = so
+    this.workingStopOrderDict[stopOrderID] = so
+    
+    // 推送停止单初始更新
+    this.strategy.onStopOrder(so)        
+    
+    return stopOrderID
   }
 
-  sendStopOrder() {
-
-  }
-
-  cancelStopOrder() {
-
+  /**
+   * 撤销停止单
+   * 
+   * @param {any} stopOrderID 
+   */
+  cancelStopOrder(stopOrderID) {
+    // 检查停止单是否存在
+    if (stopOrderID in this.workingStopOrderDict) {
+      const so = this.workingStopOrderDict[stopOrderID]
+      so.status = STOPORDER_CANCELLED
+      delete this.workingStopOrderDict[stopOrderID]
+      this.strategy.onStopOrder(so)
+    }
   }
 
   /**********************
