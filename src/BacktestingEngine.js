@@ -2,7 +2,16 @@ const {
   TICK_MODE,
   BAR_MODE,
   STOP_ORDER_PREFIX,
-  ENGINETYPE_BACKTESTING
+  ENGINETYPE_BACKTESTING,
+  STATUS_NOTTRADED,
+  STATUS_PARTTRADED,
+  STATUS_ALLTRADED,
+  STATUS_CANCELLED,
+  STATUS_REJECTED,
+  STATUS_UNKNOWN,
+  DIRECTION_LONG,
+  DIRECTION_SHORT,
+  DIRECTION_UNKNOWN
 } = require('./util/constant')
 const moment = require('moment')
 const csv = require('fast-csv')
@@ -53,7 +62,7 @@ module.exports = class BacktestingEngine {
     // 当前最新数据，用于模拟成交用
     this.tick = null 
     this.bar =null 
-    this.dt = null      // 最新的时间
+    this.time = null      // 最新的时间
     
     // 日线回测结果计算用
     this.dailyResultDict = {}
@@ -244,20 +253,137 @@ module.exports = class BacktestingEngine {
     logger.info('数据回放结束')
   }
 
+  /**
+   * 新的 K 线
+   * 
+   * @param {any} bar 
+   */
   newBar(bar) {
-
+    this.bar = bar
+    this.time = moment(`${bar.tradingDay} ${bar.endTime}`, "YYYY-MM-DD HH:mm:ss").valueOf()
+    
+    // 先撮合限价单
+    this.crossLimitOrder()      
+    // 再撮合停止单
+    this.crossStopOrder()       
+    // 推送K线到策略中
+    this.strategy.onBar(bar) 
+    
+    this.updateDailyClose(bar.tradingDay, bar.close)
   }
 
+  /**
+   * 新的 Tick
+   * 
+   * @param {any} tick 
+   */
   newTick(tick) {
-
+    // TODO: time
+    this.tick = tick
+    this.dt = tick.datetime
+    
+    this.crossLimitOrder()
+    this.crossStopOrder()
+    this.strategy.onTick(tick)
+    
+    this.updateDailyClose(tick.datetime, tick.lastPrice)
   }
 
+  /**
+   * 初始化策略
+   * 
+   * @param {any} strategyClass 
+   * @param {any} config 
+   */
   initStrategy(strategyClass, config) {
-
+    this.strategy = new strategyClass(config)
   }
 
+  /**
+   * 基于最新数据撮合限价单
+   * 
+   */
   crossLimitOrder() {
+    // 先确定会撮合成交的价格
+    let buyCrossPrice, sellCrossPrice, buyBestCrossPrice, sellBestCrossPrice
+    if (this.mode == this.BAR_MODE) {
+        // 若买入方向限价单价格高于该价格，则会成交
+        buyCrossPrice = this.bar.low        
+        // 若卖出方向限价单价格低于该价格，则会成交
+        sellCrossPrice = this.bar.high      
+        // 在当前时间点前发出的买入委托可能的最优成交价
+        buyBestCrossPrice = this.bar.open   
+        // 在当前时间点前发出的卖出委托可能的最优成交价
+        sellBestCrossPrice = this.bar.open  
+    } else {
+        buyCrossPrice = this.tick.askPrice1
+        sellCrossPrice = this.tick.bidPrice1
+        buyBestCrossPrice = this.tick.askPrice1
+        sellBestCrossPrice = this.tick.bidPrice1
+    }
+    
+    // 遍历限价单字典中的所有限价单
+    for (let {orderID, order} in this.workingLimitOrderDict) {
+        // 推送委托进入队列（未成交）的状态更新
+        if (!order.status) {
+          order.status = STATUS_NOTTRADED
+          this.strategy.onOrder(order)
+        }
 
+        // 判断是否会成交
+        // 国内的tick行情在涨停时askPrice1为0，此时买无法成交
+        const buyCross = (order.direction === DIRECTION_LONG && 
+                    order.price >= buyCrossPrice &&
+                    buyCrossPrice > 0)     
+        
+        // 国内的tick行情在跌停时bidPrice1为0，此时卖无法成交
+        const sellCross = (order.direction === DIRECTION_SHORT && 
+                     order.price <= sellCrossPrice &&
+                     sellCrossPrice > 0)
+        
+        // 如果发生了成交
+        if (buyCross || sellCross) {
+          // 推送成交数据
+          this.tradeCount += 1           // 成交编号自增1
+          const tradeID = this.tradeCount + ''
+          // const trade = VtTradeData()
+          const trade = {} 
+          trade.vtSymbol = order.vtSymbol
+          trade.tradeID = tradeID
+          trade.vtTradeID = tradeID
+          trade.orderID = order.orderID
+          trade.vtOrderID = order.orderID
+          trade.direction = order.direction
+          trade.offset = order.offset
+           
+          // 以买入为例：
+          // 1. 假设当根K线的OHLC分别为：100, 125, 90, 110
+          // 2. 假设在上一根K线结束(也是当前K线开始)的时刻，策略发出的委托为限价105
+          // 3. 则在实际中的成交价会是100而不是105，因为委托发出时市场的最优价格是100
+          if (buyCross) {
+            trade.price = Math.min(order.price, buyBestCrossPrice)
+            this.strategy.pos += order.totalVolume
+          } else {
+            trade.price = Math.max(order.price, sellBestCrossPrice)
+            this.strategy.pos -= order.totalVolume
+          }
+          
+          trade.volume = order.totalVolume
+          trade.tradeTime = moment(this.time).format('HH:mm:ss')
+          trade.time = this.time
+          this.strategy.onTrade(trade)
+          
+          this.tradeDict[tradeID] = trade
+           
+          // 推送委托数据
+          order.tradedVolume = order.totalVolume
+          order.status = STATUS_ALLTRADED
+          this.strategy.onOrder(order)
+           
+          // 从字典中删除该限价单
+          delete this.workingLimitOrderDict[orderID]
+        }
+      }
   }
 
   crossStopOrder() {
