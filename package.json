@@ -23,6 +23,7 @@
   "dependencies": {
     "fast-csv": "^2.4.1",
     "moment": "^2.19.1",
-    "winston": "^3.0.0-rc0"
+    "winston": "2.x",
+    "winston-console-formatter": "^0.3.1"
   }
 }

@@ -1,20 +1,12 @@
-const winston = require('winston')
+const winston = require('winston');
+const toYAML = require('winston-console-formatter')
 const path = require('path')
 
-// module.exports = logger
-const transports = {
-  console: new winston.transports.Console({ level: 'debug' }),
-  file: new winston.transports.File({ filename: path.resolve(__dirname, '../logs/combined.log'), level: 'debug' })
-};
+const logger = new winston.Logger({
+  level: 'silly'
+}); 
 
-const logger = winston.createLogger({
-  transports: [
-    transports.console,
-    transports.file
-  ]
-});
+logger.add(winston.transports.Console, toYAML.config());
+logger.add(winston.transports.File, { filename: path.resolve(__dirname, '../logs/combined.log'), level: 'debug' })
 
-logger.info('Will not be logged in either transport!');
-// transports.console.level = 'info';
-// transports.file.level = 'info';
-logger.info('Will be logged in both transports!');
+module.exports = logger
